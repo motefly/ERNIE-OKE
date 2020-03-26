@@ -476,6 +476,7 @@ def main():
         output_loss_file = os.path.join(args.output_dir, "loss")
         loss_fout = open(output_loss_file, 'w')
         model.train()
+        max_acc = 0
         for _ in trange(int(args.num_train_epochs), desc="Epoch"):
             model.train()
             tr_loss = 0
@@ -541,7 +542,8 @@ def main():
                 eval_accuracy = eval_accuracy / nb_eval_examples
 
                 result = {'eval_loss': eval_loss,
-                          'eval_accuracy': eval_accuracy   
+                          'eval_accuracy': eval_accuracy,
+                          'max_accuracy': max(max_acc, eval_accuracy)
                           }
 
                 with open(output_eval_file, "w") as writer:
