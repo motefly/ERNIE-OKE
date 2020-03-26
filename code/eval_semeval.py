@@ -475,8 +475,6 @@ def main():
             for key in sorted(result.keys()):
                 logger.info("  %s = %s", key, str(result[key]))
                 writer.write("%s = %s\n" % (key, str(result[key])))
-        import pdb
-        pdb.set_trace()
 
 if __name__ == "__main__":
     main()
