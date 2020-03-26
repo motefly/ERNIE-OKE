@@ -423,6 +423,7 @@ def main():
 
         vecs = []
         vecs.append([0]*100)
+        logger.info("Loading entity embedding.")
         with open("kg_embed/entity2vec.vec", 'r') as fin:
             for line in fin:
                 vec = line.strip().split('\t')
@@ -435,9 +436,25 @@ def main():
         logger.info("Shape of entity embedding: "+str(embed.weight.size()))
         del vecs
 
-        # import pdb
-        # pdb.set_trace()
-
+        if args.do_eval:
+            eval_examples = processor.get_dev_examples(args.data_dir)
+            dev = convert_examples_to_features(
+                eval_examples, label_list, args.max_seq_length, tokenizer, args.threshold)
+            
+            eval_features = dev
+            
+            logger.info("Eval  Num examples = %d", len(eval_examples))
+            logger.info("Eval  Batch size = %d", args.train_batch_size)
+            all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
+            all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
+            all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+            all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
+            all_ent = torch.tensor([f.input_ent for f in eval_features], dtype=torch.long)
+            all_ent_masks = torch.tensor([f.ent_mask for f in eval_features], dtype=torch.long)
+            eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_ent, all_ent_masks, all_label_ids)
+            # Run prediction for full data
+            eval_sampler = SequentialSampler(eval_data)
+            eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.train_batch_size)
 
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", len(train_examples))
@@ -460,6 +477,7 @@ def main():
         loss_fout = open(output_loss_file, 'w')
         model.train()
         for _ in trange(int(args.num_train_epochs), desc="Epoch"):
+            model.train()
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
@@ -489,14 +507,57 @@ def main():
                     optimizer.step()
                     optimizer.zero_grad()
                     global_step += 1
-            model_to_save = model.module if hasattr(model, 'module') else model
-            output_model_file = os.path.join(args.output_dir, "pytorch_model.bin_{}".format(global_step))
-            torch.save(model_to_save.state_dict(), output_model_file)
+                    
+            if args.do_eval:
+                logger.info("***** Running evaluation *****")
+                output_eval_file = os.path.join(args.output_dir, "eval_results_{}.txt".format(global_step))
+                model.eval()
+                eval_loss, eval_accuracy = 0, 0
+                nb_eval_steps, nb_eval_examples = 0, 0
+                for input_ids, input_mask, segment_ids, input_ent, ent_mask, label_ids in eval_dataloader:
+                    input_ent = embed(input_ent+1) # -1 -> 0
+                    input_ids = input_ids.to(device)
+                    input_mask = input_mask.to(device)
+                    segment_ids = segment_ids.to(device)
+                    input_ent = input_ent.to(device)
+                    ent_mask = ent_mask.to(device)
+                    label_ids = label_ids.to(device)
 
-        # Save a trained model
-        model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-        output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
-        torch.save(model_to_save.state_dict(), output_model_file)
+                    with torch.no_grad():
+                        tmp_eval_loss = model(input_ids, segment_ids, input_mask, input_ent, ent_mask, label_ids)
+                        logits = model(input_ids, segment_ids, input_mask, input_ent, ent_mask)
+
+                    logits = logits.detach().cpu().numpy()
+                    label_ids = label_ids.to('cpu').numpy()
+                    tmp_eval_accuracy = accuracy(logits, label_ids)
+                    
+                    eval_loss += tmp_eval_loss.mean().item()
+                    eval_accuracy += tmp_eval_accuracy
+
+                    nb_eval_examples += input_ids.size(0)
+                    nb_eval_steps += 1
+
+                eval_loss = eval_loss / nb_eval_steps
+                eval_accuracy = eval_accuracy / nb_eval_examples
+
+                result = {'eval_loss': eval_loss,
+                          'eval_accuracy': eval_accuracy   
+                          }
+
+                with open(output_eval_file, "w") as writer:
+                    logger.info("***** Eval results *****")
+                    for key in sorted(result.keys()):
+                        logger.info("  %s = %s", key, str(result[key]))
+                        writer.write("%s = %s\n" % (key, str(result[key])))
+                
+#             model_to_save = model.module if hasattr(model, 'module') else model
+#             output_model_file = os.path.join(args.output_dir, "pytorch_model.bin_{}".format(global_step))
+#             torch.save(model_to_save.state_dict(), output_model_file)
+
+#         # Save a trained model
+#         model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
+#         output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
+#         torch.save(model_to_save.state_dict(), output_model_file)
 
 if __name__ == "__main__":
     main()
