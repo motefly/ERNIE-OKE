@@ -481,7 +481,7 @@ def main():
             model.train()
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
-            for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
+            for step, batch in enumerate(train_dataloader):
                 batch = tuple(t.to(device) if i != 3 else t for i, t in enumerate(batch))
                 input_ids, input_mask, segment_ids, input_ent, ent_mask, label_ids = batch
                 input_ent = embed(input_ent+1).to(device) # -1 -> 0
@@ -540,10 +540,11 @@ def main():
 
                 eval_loss = eval_loss / nb_eval_steps
                 eval_accuracy = eval_accuracy / nb_eval_examples
+                max_acc = max(max_acc, eval_accuracy)
 
                 result = {'eval_loss': eval_loss,
                           'eval_accuracy': eval_accuracy,
-                          'max_accuracy': max(max_acc, eval_accuracy)
+                          'max_accuracy': max_acc
                           }
 
                 with open(output_eval_file, "w") as writer:
