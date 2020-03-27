@@ -252,7 +252,56 @@ class BertSelfAttention(nn.Module):
         context_layer = context_layer.view(*new_context_layer_shape)
         return context_layer
 
+class BertOKEAttention(nn.Module):
+    def __init__(self, config):
+        super(BertOKEAttention, self).__init__()
+        if config.hidden_size % config.num_attention_heads != 0:
+            raise ValueError(
+                "The hidden size (%d) is not a multiple of the number of attention "
+                "heads (%d)" % (config.hidden_size, config.num_attention_heads))
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
 
+        self.query = nn.Linear(config.hidden_size, self.all_head_size)
+        self.key = nn.Linear(100, self.all_head_size)
+        self.value = nn.Linear(100, self.all_head_size)
+
+        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+    def forward(self, text_v, ents_v):
+        mixed_query_layer = self.query(text_v)
+        mixed_key_layer = self.key(ents_v)
+        mixed_value_layer = self.value(ents_v)
+
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+        key_layer = self.transpose_for_scores(mixed_key_layer)
+        value_layer = self.transpose_for_scores(mixed_value_layer)
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+        attention_scores = attention_scores
+
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.Softmax(dim=-1)(attention_scores)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.dropout(attention_probs)
+
+        context_layer = torch.matmul(attention_probs, value_layer)
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+        return context_layer
+    
 class BertSelfOutput(nn.Module):
     def __init__(self, config):
         super(BertSelfOutput, self).__init__()
@@ -432,7 +481,7 @@ class BertEncoder(nn.Module):
             layers.append(copy.deepcopy(layer_simple))
         self.layer = nn.ModuleList(layers)
 
-    def forward(self, hidden_states, attention_mask, hidden_states_ent, attention_mask_ent, ent_mask, output_all_encoded_layers=True):
+    def forward(self, hidden_states, attention_mask, hidden_states_ent, attention_mask_ent, ent_mask, output_all_encoded_layers=True, return_ents=False):
         all_encoder_layers = []
         ent_mask = ent_mask.to(dtype=next(self.parameters()).dtype).unsqueeze(-1)
         # if self.training:
@@ -446,7 +495,10 @@ class BertEncoder(nn.Module):
                 all_encoder_layers.append(hidden_states)
         if not output_all_encoded_layers:
             all_encoder_layers.append(hidden_states)
-        return all_encoder_layers
+        if return_ents:
+            return all_encoder_layers, hidden_states_ent
+        else:
+            return all_encoder_layers
 
 
 class BertPooler(nn.Module):
@@ -733,7 +785,7 @@ class BertModel(PreTrainedBertModel):
         self.pooler = BertPooler(config)
         self.apply(self.init_bert_weights)
 
-    def forward(self, input_ids, token_type_ids=None, attention_mask=None, input_ent=None, ent_mask=None, output_all_encoded_layers=True):
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None, input_ent=None, ent_mask=None, output_all_encoded_layers=True, return_ents=False):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
         if token_type_ids is None:
@@ -763,11 +815,16 @@ class BertModel(PreTrainedBertModel):
                                       input_ent,
                                       extended_ent_mask,
                                       ent_mask,
-                                      output_all_encoded_layers=output_all_encoded_layers)
+                                      output_all_encoded_layers=output_all_encoded_layers,
+                                      return_ents=return_ents)
+        if return_ents:
+            encoded_layers, ents = encoded_layers
         sequence_output = encoded_layers[-1]
         pooled_output = self.pooler(sequence_output)
         if not output_all_encoded_layers:
             encoded_layers = encoded_layers[-1]
+        if return_ents:
+            pooled_output = ents
         return encoded_layers, pooled_output
 
 
@@ -1085,8 +1142,35 @@ class BertForSequenceClassification(PreTrainedBertModel):
         else:
             return logits
 
+class OKELMForSequenceClassification(PreTrainedBertModel):
+    def __init__(self, config, num_labels=2):
+        super(OKELMForSequenceClassification, self).__init__(config)
+        self.num_labels = num_labels
+        self.bert = BertModel(config)
+        self.oke = BertOKEAttention(config)
+        self.pooler = BertPooler(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, num_labels)
+        self.apply(self.init_bert_weights)
 
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None, input_ent=None, ent_mask=None, labels=None):
+        features, ents = self.bert(input_ids, token_type_ids, attention_mask, input_ent, ent_mask, output_all_encoded_layers=False, return_ents=True)
+        
+        oke_v = self.oke(features, ents*ent_mask.unsqueeze(-1))
+        
+        pooled_output = self.pooler(features + oke_v)
+        
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output)
 
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            return loss
+        else:
+            return logits
+
+        
 class BertForNQ(PreTrainedBertModel):
 
     def __init__(self, config, num_choices=2):
