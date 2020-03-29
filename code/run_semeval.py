@@ -148,8 +148,8 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
         ent_a = [x for x in example.text_a[1] if x[-1]>threshold]
         tokens_a, entities_a = tokenizer.tokenize(ex_text_a, ent_a)
 
-        tokens = ["[CLS]"] + tokens_a + ["[SEP]"]
-        ents = ["UNK"] + entities_a + ["UNK"]
+        tokens = (["[CLS]"] + tokens_a + ["[SEP]"])[:max_seq_length]
+        ents = (["UNK"] + entities_a + ["UNK"])[:max_seq_length]
         segment_ids = [0] * len(tokens)
 
         input_ids = tokenizer.convert_tokens_to_ids(tokens)
@@ -177,7 +177,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
         segment_ids += padding
         ent_mask += padding
         input_ent += padding_
-
+        
         assert len(input_ids) == max_seq_length
         assert len(input_mask) == max_seq_length
         assert len(segment_ids) == max_seq_length
@@ -431,7 +431,7 @@ def main():
                 vecs.append(vec)
         embed = torch.FloatTensor(vecs)
         embed = torch.nn.Embedding.from_pretrained(embed)
-        #embed = torch.nn.Embedding(5041175, 100)
+#         embed = torch.nn.Embedding(5041175, 100)
 
         logger.info("Shape of entity embedding: "+str(embed.weight.size()))
         del vecs
